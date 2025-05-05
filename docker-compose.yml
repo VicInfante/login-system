@@ -1,4 +1,24 @@
 services:
+    traefik:
+        image: traefik:v2.10
+        container_name: traefik
+        restart: always
+        ports:
+            - "80:80"       # Puerto HTTP
+            - "443:443"     # Puerto HTTPS
+            - "8080:8080"   # Puerto para la interfaz web de Traefik
+        command:
+            - "--api.insecure=true" # Habilita la interfaz web de Traefik (solo para desarrollo)
+            - "--api.dashboard=true" # Habilita el dashboard de Traefik
+            - "--providers.docker=true" # Habilita la integración con Docker
+            - "--providers.docker.exposedbydefault=false" # Solo enruta contenedores con etiquetas específicas
+            - "--entrypoints.web.address=:80" # Define el punto de entrada HTTP
+            - "--entrypoints.websecure.address=:443" # Define el punto de entrada HTTPS
+        volumes:
+            - "/var/run/docker.sock:/var/run/docker.sock:ro" # Permite a Traefik acceder a los contenedores Docker
+        networks:
+            - sail
+
     laravel.test:
         build:
             context: './vendor/laravel/sail/runtimes/8.4'
@@ -8,9 +28,6 @@ services:
         image: 'sail-8.4/app'
         extra_hosts:
             - 'host.docker.internal:host-gateway'
-        ports:
-            - '${APP_PORT:-80}:80'
-            - '${VITE_PORT:-5173}:${VITE_PORT:-5173}'
         environment:
             WWWUSER: '${WWWUSER}'
             LARAVEL_SAIL: 1
@@ -19,10 +36,15 @@ services:
             IGNITION_LOCAL_SITES_PATH: '${PWD}'
         volumes:
             - '.:/var/www/html'
+        labels:
+            - "traefik.enable=true" # Habilita este contenedor para Traefik
+            - "traefik.http.routers.laravel.rule=Host(`localhost`)" # Define la regla de enrutamiento
+            - "traefik.http.services.laravel.loadbalancer.server.port=80" # Puerto interno del contenedor
         networks:
             - sail
         depends_on:
             - pgsql
+
     pgsql:
         image: 'postgres:17'
         ports:
@@ -48,9 +70,40 @@ services:
                 - '${DB_USERNAME}'
             retries: 3
             timeout: 5s
+
+    portainer:
+        image: portainer/portainer-ce:latest
+        container_name: portainer
+        restart: always
+        ports:
+            - "9000:9000"
+        volumes:
+            - /var/run/docker.sock:/var/run/docker.sock
+            - portainer_data:/data
+        networks:
+            - sail
+
+    pgadmin:
+        image: dpage/pgadmin4:latest
+        container_name: pgadmin
+        restart: always
+        ports:
+            - "5050:80" 
+        environment:
+            PGADMIN_DEFAULT_EMAIL: admin@example.com 
+            PGADMIN_DEFAULT_PASSWORD: admin 
+        volumes:
+            - pgadmin_data:/var/lib/pgadmin
+        networks:
+            - sail
+
 networks:
     sail:
         driver: bridge
 volumes:
     sail-pgsql:
+        driver: local
+    portainer_data:
+        driver: local
+    pgadmin_data:
         driver: local

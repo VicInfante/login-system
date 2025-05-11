@@ -14,11 +14,33 @@ services:
             - "--providers.docker.exposedbydefault=false" # Solo enruta contenedores con etiquetas específicas
             - "--entrypoints.web.address=:80" # Define el punto de entrada HTTP
             - "--entrypoints.websecure.address=:443" # Define el punto de entrada HTTPS
+            - "--entrypoints.web.http.redirections.entryPoint.to=websecure" # Redirige HTTP a HTTPS
+            - "--entrypoints.web.http.redirections.entryPoint.scheme=https" # Especifica el esquema HTTPS
+            - "--certificatesresolvers.myresolver.acme.httpchallenge=true"  # Habilita el desafío HTTP de Let's Encrypt
+            - "--certificatesresolvers.myresolver.acme.httpchallenge.entrypoint=web"    # Define el punto de entrada para el desafío HTTP
+            - "--certificatesresolvers.myresolver.acme.email=admin@example.com"         # Correo electrónico para Let's Encrypt
+            - "--certificatesresolvers.myresolver.acme.storage=/letsencrypt/acme.json"  # Almacena los certificados en el volumen
         volumes:
             - "/var/run/docker.sock:/var/run/docker.sock:ro" # Permite a Traefik acceder a los contenedores Docker
+            - "./letsencrypt:/letsencrypt"
         networks:
             - sail
-
+        labels:
+            - "traefik.http.middlewares.ratelimit.rateSet.burst=20" # Máximo de 20 solicitudes en ráfaga
+            - "traefik.http.middlewares.ratelimit.rateSet.average=10" # 10 solicitudes por segundo
+            - "traefik.http.routers.laravel.middlewares=ratelimit" # Aplica el middleware al router Laravel
+            - "traefik.http.middlewares.secure-headers.headers.customResponseHeaders.Content-Security-Policy=default-src 'self'"                  # Configura la política de seguridad de contenido
+            - "traefik.http.middlewares.secure-headers.headers.customResponseHeaders.X-Frame-Options=SAMEORIGIN"                                  # Evita el clickjacking 
+            - "traefik.http.middlewares.secure-headers.headers.customResponseHeaders.X-Content-Type-Options=nosniff"                                # Evita el sniffing de contenido
+            - "traefik.http.middlewares.secure-headers.headers.customResponseHeaders.Strict-Transport-Security=max-age=31536000; includeSubDomains" # HSTS para proteger contra ataques de downgrade    
+            - "traefik.http.routers.laravel.middlewares=secure-headers"                 # Aplica los encabezados de seguridad al router Laravel
+            - "traefik.http.routers.laravel.rule=Host(`localhost`)"                    # Regla para enrutar el tráfico al contenedor Laravel
+            - "traefik.http.routers.laravel.entrypoints=websecure"                     # Usa el punto de entrada seguro
+            - "traefik.http.routers.laravel.tls=true"                                 # Habilita TLS
+            - "traefik.http.routers.laravel.tls.certresolver=myresolver"               # Usa el resolutor de certificados definido
+            - "traefik.http.services.laravel.loadbalancer.server.port=80"             # Puerto del contenedor Laravel
+            - "traefik.enable=true"                                                  # Habilita Traefik para este contenedor
+            
     laravel.test:
         build:
             context: './vendor/laravel/sail/runtimes/8.4'
@@ -34,21 +56,25 @@ services:
             XDEBUG_MODE: '${SAIL_XDEBUG_MODE:-off}'
             XDEBUG_CONFIG: '${SAIL_XDEBUG_CONFIG:-client_host=host.docker.internal}'
             IGNITION_LOCAL_SITES_PATH: '${PWD}'
+        command: >
+            sh -c "while ! pg_isready -h pgsql -q; do echo 'Esperando a la base de datos...'; sleep 1; done && composer install && php artisan migrate && php-fpm"
         volumes:
             - '.:/var/www/html'
         labels:
-            - "traefik.enable=true" # Habilita este contenedor para Traefik
-            - "traefik.http.routers.laravel.rule=Host(`localhost`)" # Define la regla de enrutamiento
-            - "traefik.http.services.laravel.loadbalancer.server.port=80" # Puerto interno del contenedor
+            - "traefik.enable=true"
+            - "traefik.http.routers.laravel.rule=Host(`localhost`)"
+            - "traefik.http.routers.laravel.entrypoints=websecure"
+            - "traefik.http.routers.laravel.tls=true"
+            - "traefik.http.routers.laravel.tls.certresolver=myresolver" # Solo si usas Let's Encrypt
+            - "traefik.http.services.laravel.loadbalancer.server.port=80"
         networks:
             - sail
+            - internal # Conecta Laravel a la red interna para acceder a la base de datos
         depends_on:
             - pgsql
 
     pgsql:
         image: 'postgres:17'
-        ports:
-            - '${FORWARD_DB_PORT:-5432}:5432'
         environment:
             PGPASSWORD: '${DB_PASSWORD:-secret}'
             POSTGRES_DB: '${DB_DATABASE}'
@@ -58,7 +84,7 @@ services:
             - 'sail-pgsql:/var/lib/postgresql/data'
             - './vendor/laravel/sail/database/pgsql/create-testing-database.sql:/docker-entrypoint-initdb.d/10-create-testing-database.sql'
         networks:
-            - sail
+            - internal # Solo está conectado a la red interna
         healthcheck:
             test:
                 - CMD
@@ -100,6 +126,12 @@ services:
 networks:
     sail:
         driver: bridge
+    private:
+        driver: bridge
+    internal:
+        driver: bridge
+        internal: true # Red interna para comunicación segura entre contenedores
+
 volumes:
     sail-pgsql:
         driver: local
@@ -107,3 +139,4 @@ volumes:
         driver: local
     pgadmin_data:
         driver: local
+
